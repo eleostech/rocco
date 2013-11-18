@@ -367,6 +367,18 @@ class Rocco
     end
   end
 
+  # Find special code-specified languages to support polyglot files
+  # This means if the first line of the code block contains `!!!language` where `language`
+  # is the name of a pygmentize lexer, then treat all of the code for the rest of the file
+  # as that language.
+  def parse_code_block(code)
+    if match = code.match(/^!!!([\S]+)\n/)
+      [code.sub(/^!!![\S]+\n/, ""), match[1]]
+    else
+      [code, nil]
+    end
+  end
+
   # Take the result of `split` and apply Markdown formatting to comments and
   # syntax highlighting to source code.
   def highlight(blocks)
@@ -412,19 +424,31 @@ class Rocco
       )
     end
 
-    code_stream = code_blocks.join(divider_input)
+    code_tuples = code_blocks.map { |code| parse_code_block(code) }
 
-    code_html =
+    # we want to find groups of code blocks that contain the same language, so
+    # we can pygmentize them together as if each language section were a single file
+    code_grouped_by_language = code_tuples.chunk do |code_tuples, language|
+      # chunk throws away nil values here, so we need to provide :default instead of nil
+      language || :default
+    end
+
+    code_html_sections = code_grouped_by_language.map do |language, code_tuples|
+      code_blocks = code_tuples.map &:first
+
+      language = if language != :default then language else nil end
+
       if pygmentize?
-        highlight_pygmentize(code_stream)
+        highlight_pygmentize(code_blocks.join(divider_input), language)
       else
-        highlight_webservice(code_stream)
+        highlight_webservice(code_blocks.join(divider_input), language)
       end
+    end
 
     # Do some post-processing on the pygments output to split things back
     # into sections and remove partial `<pre>` blocks.
-    code_html = code_html.
-      split(divider_output).
+    code_html = code_html_sections.map {|blocks| blocks.split(divider_output) }.
+      flatten.
       map { |code| code.sub(/\n?<div class="highlight"><pre>/m, '') }.
       map { |code| code.sub(/\n?<\/pre><\/div>\n/m, '') }
 
@@ -439,9 +463,9 @@ class Rocco
 
   # We `popen` a read/write pygmentize process in the parent and
   # then fork off a child process to write the input.
-  def highlight_pygmentize(code)
+  def highlight_pygmentize(code, language = nil)
     code_html = nil
-    open("|pygmentize -l #{@options[:language]} -O encoding=utf-8 -f html", 'r+') do |fd|
+    open("|pygmentize -l #{language || @options[:language]} -O encoding=utf-8 -f html", 'r+') do |fd|
       pid =
         fork {
           fd.close_read
@@ -460,9 +484,9 @@ class Rocco
 
   # Pygments is not one of those things that's trivial for a ruby user to install,
   # so we'll fall back on a webservice to highlight the code if it isn't available.
-  def highlight_webservice(code)
+  def highlight_webservice(code, language = nil)
     url = URI.parse 'http://pygments.appspot.com/'
-    options = { 'lang' => @options[:language], 'code' => code}
+    options = { 'lang' => (language || @options[:language]), 'code' => code}
     Net::HTTP.post_form(url, options).body
   end
 end
